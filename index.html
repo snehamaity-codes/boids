@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Boids flocking simulation with physical bounce walls, cohesion, separation, alignment, and predator avoidance.">
+  <title>Boids: Physical Bounce Walls</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet"></noscript>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #06060f;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      color: #c0c0d0;
+      overflow: hidden;
+      padding: 12px;
+    }
+
+    h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      color: #00ffb4;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+      text-shadow: 0 0 18px rgba(0, 255, 180, 0.35);
+    }
+
+    #canvas-wrap {
+      position: relative;
+      border-radius: 14px;
+      overflow: hidden;
+      width: 100%;
+      max-width: 1000px;
+      box-shadow:
+        0 0 0 1px rgba(0,255,180,0.12),
+        0 4px 40px rgba(0,0,0,0.6),
+        0 0 80px rgba(0,255,180,0.06);
+    }
+
+    canvas {
+      display: block;
+      cursor: none;
+      background: #0a0a19;
+      width: 100%;
+      height: auto;
+      touch-action: none;
+    }
+
+    .hud {
+      position: absolute;
+      top: 12px;
+      left: 16px;
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.35);
+      pointer-events: none;
+      letter-spacing: 0.04em;
+    }
+
+    .controls {
+      margin-top: 16px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .controls label {
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.4);
+    }
+
+    .controls input[type="range"] {
+      accent-color: #00ffb4;
+      width: 110px;
+    }
+
+    .controls span {
+      font-size: 0.72rem;
+      color: #00ffb4;
+      min-width: 28px;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Boids — Flocking Simulation</h1>
+
+  <div id="canvas-wrap">
+    <canvas id="boids-canvas" width="1000" height="800"></canvas>
+    <div class="hud" id="hud">FPS: --</div>
+  </div>
+
+  <div class="controls">
+    <label for="count-slider">Boid Count</label>
+    <input type="range" id="count-slider" min="20" max="300" value="100" step="10">
+    <span id="count-val">100</span>
+  </div>
+
+  <script>
+    // --- CONFIGURATION ---
+    const WIDTH = 1000;
+    const HEIGHT = 800;
+    let BOID_COUNT = 100;
+    const PERCEPTION_RADIUS = 100;
+    const DESIRED_SEPARATION = 30;
+    const MAX_SPEED = 2.5;
+    const MAX_FORCE = 0.1;
+
+    // Auto-reduce boids on mobile for smooth performance
+    const isMobile = window.innerWidth < 600;
+    if (isMobile) BOID_COUNT = 50;
+
+    const canvas = document.getElementById('boids-canvas');
+    const ctx = canvas.getContext('2d');
+    const hudEl = document.getElementById('hud');
+    const countSlider = document.getElementById('count-slider');
+    const countVal = document.getElementById('count-val');
+
+    // --- Mouse tracking ---
+    let mouseX = WIDTH / 2;
+    let mouseY = HEIGHT / 2;
+    let prevMouseX = mouseX;
+    let prevMouseY = mouseY;
+    let predatorDirX = 0;
+    let predatorDirY = -1;
+    let mouseInCanvas = false;
+
+    // Convert screen coords to canvas coords (handles CSS scaling)
+    function screenToCanvas(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      return [
+        (clientX - rect.left) * scaleX,
+        (clientY - rect.top) * scaleY
+      ];
+    }
+
+    // Mouse events (desktop)
+    canvas.addEventListener('mousemove', (e) => {
+      [mouseX, mouseY] = screenToCanvas(e.clientX, e.clientY);
+      mouseInCanvas = true;
+    });
+    canvas.addEventListener('mouseleave', () => { mouseInCanvas = false; });
+
+    // Touch events (mobile)
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const t = e.touches[0];
+      [mouseX, mouseY] = screenToCanvas(t.clientX, t.clientY);
+      mouseInCanvas = true;
+    }, { passive: false });
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      const t = e.touches[0];
+      [mouseX, mouseY] = screenToCanvas(t.clientX, t.clientY);
+      mouseInCanvas = true;
+    }, { passive: false });
+    canvas.addEventListener('touchend', () => { mouseInCanvas = false; });
+    canvas.addEventListener('touchcancel', () => { mouseInCanvas = false; });
+
+    // --- Vector helpers ---
+    function vecLen(x, y) { return Math.sqrt(x * x + y * y); }
+    function vecDist(ax, ay, bx, by) { return vecLen(ax - bx, ay - by); }
+    function vecNorm(x, y, len) {
+      const l = vecLen(x, y);
+      if (l === 0) return [0, 0];
+      return [(x / l) * len, (y / l) * len];
+    }
+    function clampVec(x, y, maxLen) {
+      const l = vecLen(x, y);
+      if (l > maxLen) { return [(x / l) * maxLen, (y / l) * maxLen]; }
+      return [x, y];
+    }
+
+    // --- Boid class ---
+    class Boid {
+      constructor() {
+        this.x = 50 + Math.random() * (WIDTH - 100);
+        this.y = 50 + Math.random() * (HEIGHT - 100);
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * (MAX_SPEED - 2);
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.ax = 0;
+        this.ay = 0;
+      }
+
+      bounceOffWalls() {
+        if (this.x <= 0)     { this.x = 0;     this.vx *= -1; }
+        else if (this.x >= WIDTH)  { this.x = WIDTH;  this.vx *= -1; }
+        if (this.y <= 0)     { this.y = 0;     this.vy *= -1; }
+        else if (this.y >= HEIGHT) { this.y = HEIGHT; this.vy *= -1; }
+      }
+
+      applyRules(flock) {
+        let cohX = 0, cohY = 0, cohTotal = 0;
+        let sepX = 0, sepY = 0, sepTotal = 0;
+        let aliX = 0, aliY = 0, aliTotal = 0;
+
+        for (let i = 0; i < flock.length; i++) {
+          const o = flock[i];
+          if (o === this) continue;
+          const dist = vecDist(this.x, this.y, o.x, o.y);
+
+          // Cohesion + Alignment (within perception radius)
+          if (dist < PERCEPTION_RADIUS) {
+            cohX += o.x; cohY += o.y; cohTotal++;
+            aliX += o.vx; aliY += o.vy; aliTotal++;
+          }
+          // Separation (within desired separation)
+          if (dist > 0 && dist < DESIRED_SEPARATION) {
+            const dx = (this.x - o.x) / dist;
+            const dy = (this.y - o.y) / dist;
+            sepX += dx; sepY += dy; sepTotal++;
+          }
+        }
+
+        // Cohesion steering
+        if (cohTotal > 0) {
+          cohX /= cohTotal; cohY /= cohTotal;
+          let desX = cohX - this.x, desY = cohY - this.y;
+          [desX, desY] = vecNorm(desX, desY, MAX_SPEED);
+          let sx = desX - this.vx, sy = desY - this.vy;
+          [sx, sy] = clampVec(sx, sy, MAX_FORCE);
+          this.ax += sx * 1.0;
+          this.ay += sy * 1.0;
+        }
+
+        // Separation steering
+        if (sepTotal > 0) {
+          sepX /= sepTotal; sepY /= sepTotal;
+          [sepX, sepY] = vecNorm(sepX, sepY, MAX_SPEED);
+          let sx = sepX - this.vx, sy = sepY - this.vy;
+          [sx, sy] = clampVec(sx, sy, MAX_FORCE);
+          this.ax += sx * 1.8;
+          this.ay += sy * 1.8;
+        }
+
+        // Alignment steering
+        if (aliTotal > 0) {
+          aliX /= aliTotal; aliY /= aliTotal;
+          [aliX, aliY] = vecNorm(aliX, aliY, MAX_SPEED);
+          let sx = aliX - this.vx, sy = aliY - this.vy;
+          [sx, sy] = clampVec(sx, sy, MAX_FORCE);
+          this.ax += sx * 1.0;
+          this.ay += sy * 1.0;
+        }
+      }
+
+      avoidMouse() {
+        if (!mouseInCanvas) return;
+        const dist = vecDist(this.x, this.y, mouseX, mouseY);
+        if (dist < 80) {
+          let desX = this.x - mouseX, desY = this.y - mouseY;
+          [desX, desY] = vecNorm(desX, desY, MAX_SPEED * 2.0);
+          const sx = desX - this.vx, sy = desY - this.vy;
+          this.ax += sx * 0.4;
+          this.ay += sy * 0.4;
+        }
+      }
+
+      update() {
+        this.vx += this.ax;
+        this.vy += this.ay;
+        [this.vx, this.vy] = clampVec(this.vx, this.vy, MAX_SPEED);
+        this.x += this.vx;
+        this.y += this.vy;
+        this.ax = 0;
+        this.ay = 0;
+      }
+
+      draw() {
+        const angle = Math.atan2(this.vx, -this.vy);
+        const size = 13;
+        const p1x = this.x + Math.sin(angle) * (-size);
+        const p1y = this.y + Math.cos(angle) * (size);   // tip (forward)
+        const p2x = this.x + Math.sin(angle - 2.3) * (size * 0.6);
+        const p2y = this.y + Math.cos(angle - 2.3) * (-size * 0.6);
+        const p3x = this.x + Math.sin(angle + 2.3) * (size * 0.6);
+        const p3y = this.y + Math.cos(angle + 2.3) * (-size * 0.6);
+
+        ctx.beginPath();
+        ctx.moveTo(p1x, p1y);
+        ctx.lineTo(p2x, p2y);
+        ctx.lineTo(p3x, p3y);
+        ctx.closePath();
+        ctx.fillStyle = '#00ffb4';
+        ctx.fill();
+      }
+    }
+
+    // --- Draw predator (mouse cursor) ---
+    function drawPredator() {
+      if (!mouseInCanvas) return;
+
+      const mvx = mouseX - prevMouseX;
+      const mvy = mouseY - prevMouseY;
+      if (vecLen(mvx, mvy) > 2) {
+        predatorDirX = mvx;
+        predatorDirY = mvy;
+      }
+      prevMouseX = mouseX;
+      prevMouseY = mouseY;
+
+      const angle = Math.atan2(predatorDirX, -predatorDirY);
+      const s = 30;
+      const p1x = mouseX + Math.sin(angle) * (-s);
+      const p1y = mouseY + Math.cos(angle) * (s);
+      const p2x = mouseX + Math.sin(angle - 2.3) * (s * 0.6);
+      const p2y = mouseY + Math.cos(angle - 2.3) * (-s * 0.6);
+      const p3x = mouseX + Math.sin(angle + 2.3) * (s * 0.6);
+      const p3y = mouseY + Math.cos(angle + 2.3) * (-s * 0.6);
+
+      ctx.beginPath();
+      ctx.moveTo(p1x, p1y);
+      ctx.lineTo(p2x, p2y);
+      ctx.lineTo(p3x, p3y);
+      ctx.closePath();
+      ctx.fillStyle = '#dc1e1e';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Glow effect
+      ctx.save();
+      ctx.shadowColor = 'rgba(220, 30, 30, 0.5)';
+      ctx.shadowBlur = 18;
+      ctx.beginPath();
+      ctx.moveTo(p1x, p1y);
+      ctx.lineTo(p2x, p2y);
+      ctx.lineTo(p3x, p3y);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(220, 30, 30, 0.25)';
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // --- Flock ---
+    let flock = [];
+    function resetFlock(count) {
+      flock = [];
+      for (let i = 0; i < count; i++) flock.push(new Boid());
+    }
+    resetFlock(BOID_COUNT);
+    countSlider.value = BOID_COUNT;
+    countVal.textContent = BOID_COUNT;
+
+    // --- Slider ---
+    countSlider.addEventListener('input', () => {
+      BOID_COUNT = parseInt(countSlider.value);
+      countVal.textContent = BOID_COUNT;
+      resetFlock(BOID_COUNT);
+    });
+
+    // --- FPS tracking ---
+    let lastTime = performance.now();
+    let frameCount = 0;
+    let fps = 0;
+
+    // --- Main loop ---
+    function loop(now) {
+      // FPS
+      frameCount++;
+      if (now - lastTime >= 1000) {
+        fps = frameCount;
+        frameCount = 0;
+        lastTime = now;
+        hudEl.textContent = `FPS: ${fps}  |  Boids: ${flock.length}`;
+      }
+
+      // Clear
+      ctx.fillStyle = '#0a0a19';
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      // Subtle grid
+      ctx.strokeStyle = 'rgba(255,255,255,0.018)';
+      ctx.lineWidth = 1;
+      for (let gx = 0; gx < WIDTH; gx += 50) {
+        ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, HEIGHT); ctx.stroke();
+      }
+      for (let gy = 0; gy < HEIGHT; gy += 50) {
+        ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(WIDTH, gy); ctx.stroke();
+      }
+
+      // Update & draw boids
+      for (let i = 0; i < flock.length; i++) {
+        flock[i].applyRules(flock);
+        flock[i].avoidMouse();
+        flock[i].bounceOffWalls();
+        flock[i].update();
+        flock[i].draw();
+      }
+
+      drawPredator();
+
+      requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
