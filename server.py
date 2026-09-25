@@ -15,9 +15,14 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 Handler = http.server.SimpleHTTPServer = http.server.SimpleHTTPRequestHandler
 
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 print(f"\n  Boids Simulation Server")
-print(f"  ─────────────────────────")
-print(f"  Running at → http://localhost:{PORT}")
+print(f"  -------------------------")
+print(f"  Running at -> http://localhost:{PORT}")
 print(f"  Press Ctrl+C to stop\n")
 
 webbrowser.open(f"http://localhost:{PORT}")
